@@ -1,6 +1,6 @@
 # ------------------------ Paths ------------------------
 # Additional files
-SMPL_MODEL_DIR = 'additional/smpl'
+SMPL_MODEL_DIR = '/mnt/storage_ssd/personal_projects/3d/SMPL_models/smpl_1.1'
 SMPL_FACES_PATH = 'additional/smpl_faces.npy'
 SMPL_MEAN_PARAMS_PATH = 'additional/neutral_smpl_mean_params_6dpose.npz'
 J_REGRESSOR_EXTRA_PATH = 'additional/J_regressor_extra.npy'
@@ -10,9 +10,10 @@ VERTEX_TEXTURE_PATH = 'additional/vertex_texture.npy'
 CUBE_PARTS_PATH = 'additional/cube_parts.npy'
 
 # ------------------------ Constants ------------------------
+# FOCAL_LENGTH = 10000.
+# REGRESSOR_IMG_WH = 512
 FOCAL_LENGTH = 5000.
 REGRESSOR_IMG_WH = 256
-
 # ------------------------ Joint label conventions ------------------------
 # The SMPL model (im smpl_official.py) returns a large superset of joints.
 # Different subsets are used during training - e.g. H36M 3D joints convention and COCO 2D joints convention.

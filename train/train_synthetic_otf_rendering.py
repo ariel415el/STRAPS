@@ -1,4 +1,6 @@
 import copy
+import os
+
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -20,8 +22,317 @@ from augmentation.smpl_augmentation import augment_smpl
 from augmentation.cam_augmentation import augment_cam_t
 from augmentation.proxy_rep_augmentation import augment_proxy_representation, \
     random_verts2D_deviation
+from predict.predict_3D import predict_3D
 
 import config
+
+def train_epoch(device,
+              train_dataloader,
+              mean_shape,
+              epoch,
+              best_epoch,
+              best_epoch_val_metrics,
+              best_model_wts,
+              metrics_tracker,
+              regressor,
+              smpl_model,
+              nmr_parts_renderer,
+              criterion,
+              optimiser,
+              smpl_augment_params,
+              cam_augment_params,
+              bbox_augment_params,
+              proxy_rep_augment_params,
+              mean_cam_t,
+              cam_K,
+              cam_R,
+              model_save_path):
+    total_step=0
+    for batch_num, samples_batch in enumerate(tqdm(train_dataloader)):
+        # ---------------- SYNTHETIC DATA GENERATION ----------------
+        with torch.no_grad():
+            # TARGET SMPL PARAMETERS
+            target_pose = samples_batch['pose']
+            target_shape = samples_batch['shape']
+            gender = torch.randint(0, 2, (len(target_pose),)).to(device)
+            target_pose = target_pose.to(device)
+            target_shape = target_shape.to(device)
+            num_train_inputs_in_batch = target_pose.shape[0]  # Same as bs since drop_last=True
+
+            # SMPL AND CAM AUGMENTATION
+            target_shape, target_pose_rotmats, target_glob_rotmats = augment_smpl(
+                target_shape,
+                target_pose[:, 3:],
+                target_pose[:, :3],
+                mean_shape,
+                smpl_augment_params)
+            target_cam_t = augment_cam_t(mean_cam_t,
+                                         xy_std=cam_augment_params['xy_std'],
+                                         delta_z_range=cam_augment_params['delta_z_range'])
+
+            # TARGET VERTICES AND JOINTS
+            target_smpl_output = smpl_model(gender=gender,
+                                            body_pose=target_pose_rotmats,
+                                            global_orient=target_glob_rotmats,
+                                            betas=target_shape,
+                                            pose2rot=False)
+            target_vertices = target_smpl_output.vertices
+            target_joints_all = target_smpl_output.joints
+            target_joints_h36m = target_joints_all[:, config.ALL_JOINTS_TO_H36M_MAP, :]
+            target_joints_h36mlsp = target_joints_h36m[:, config.H36M_TO_J14, :]
+            target_joints_coco = target_joints_all[:, config.ALL_JOINTS_TO_COCO_MAP, :]
+            target_joints2d_coco = perspective_project_torch(target_joints_coco, cam_R,
+                                                             target_cam_t,
+                                                             cam_K=cam_K)
+            target_reposed_smpl_output = smpl_model(gender=gender, betas=target_shape)
+            target_reposed_vertices = target_reposed_smpl_output.vertices
+
+            if proxy_rep_augment_params['deviate_verts2D']:
+                # Vertex noise augmentation to give noisy proxy representation edges
+                target_vertices_for_rendering = random_verts2D_deviation(target_vertices,
+                                                                         delta_verts2d_dev_range=
+                                                                         proxy_rep_augment_params[
+                                                                             'delta_verts2d_dev_range'])
+            else:
+                target_vertices_for_rendering = target_vertices
+
+            # INPUT PROXY REPRESENTATION GENERATION
+            input = nmr_parts_renderer(target_vertices_for_rendering, target_cam_t)
+
+            # BBOX AUGMENTATION AND CROPPING
+            if bbox_augment_params['crop_input']:
+                # Crop inputs according to bounding box
+                # + add random scale and centre augmentation
+                input = input.cpu().detach().numpy()
+                target_joints2d_coco = target_joints2d_coco.cpu().detach().numpy()
+                all_cropped_segs, all_cropped_joints2D = batch_crop_seg_to_bounding_box(
+                    input, target_joints2d_coco,
+                    orig_scale_factor=bbox_augment_params['mean_scale_factor'],
+                    delta_scale_range=bbox_augment_params['delta_scale_range'],
+                    delta_centre_range=bbox_augment_params['delta_centre_range'])
+                resized_input, resized_joints2D = batch_resize(all_cropped_segs, all_cropped_joints2D,
+                                                               config.REGRESSOR_IMG_WH)
+                input = torch.from_numpy(resized_input).float().to(device)
+                target_joints2d_coco = torch.from_numpy(resized_joints2D).float().to(device)
+
+            # PROXY REPRESENTATION AUGMENTATION
+            input, target_joints2d_coco_input = augment_proxy_representation(input,
+                                                                             target_joints2d_coco,
+                                                                             proxy_rep_augment_params)
+
+            # FINAL INPUT PROXY REPRESENTATION GENERATION WITH JOINT HEATMAPS
+            input = convert_multiclass_to_binary_labels_torch(input)
+            input = input.unsqueeze(1)
+            j2d_heatmaps = convert_2Djoints_to_gaussian_heatmaps_torch(target_joints2d_coco_input,
+                                                                       config.REGRESSOR_IMG_WH)
+            input = torch.cat([input, j2d_heatmaps], dim=1)
+
+        #
+        # # TODO: Ariel vis
+        # from vedo import Mesh, show
+        # import matplotlib.pyplot as plt
+        # for i in range(len(input)):
+        #     # img = input[i].cpu().numpy()
+        #     img = input[i].cpu().numpy()[0]
+        #     # img += np.random.rand(*img.shape).astype(img.dtype)
+        #     plt.matshow(img)
+        #     plt.show()
+        #     mesh = Mesh(
+        #         [target_vertices_for_rendering[i].cpu().numpy(), nmr_parts_renderer.faces[i].cpu().numpy()],
+        #         alpha=0.5, c="lightblue")  # bc: border colo
+        #     show(mesh, axes=1, title="3D Mesh Visualization with Vedo")
+
+        # ---------------- FORWARD PASS ----------------
+        # (gradients being computed from here on)
+        pred_cam_wp, pred_pose, pred_shape = regressor(input, gender)
+
+        # Convert pred pose to rotation matrices
+        if pred_pose.shape[-1] == 24 * 3:
+            pred_pose_rotmats = batch_rodrigues(pred_pose.contiguous().view(-1, 3))
+            pred_pose_rotmats = pred_pose_rotmats.view(-1, 24, 3, 3)
+        elif pred_pose.shape[-1] == 24 * 6:
+            pred_pose_rotmats = rot6d_to_rotmat(pred_pose.contiguous()).view(-1, 24, 3, 3)
+
+        # PREDICTED VERTICES AND JOINTS
+        pred_smpl_output = smpl_model(gender=gender,
+                                      body_pose=pred_pose_rotmats[:, 1:],
+                                      global_orient=pred_pose_rotmats[:, 0].unsqueeze(1),
+                                      betas=pred_shape,
+                                      pose2rot=False)
+        pred_vertices = pred_smpl_output.vertices
+        pred_joints_all = pred_smpl_output.joints
+        pred_joints_h36m = pred_joints_all[:, config.ALL_JOINTS_TO_H36M_MAP, :]
+        pred_joints_h36mlsp = pred_joints_h36m[:, config.H36M_TO_J14, :]
+        pred_joints_coco = pred_joints_all[:, config.ALL_JOINTS_TO_COCO_MAP, :]
+        pred_joints2d_coco = orthographic_project_torch(pred_joints_coco, pred_cam_wp)
+        pred_reposed_smpl_output = smpl_model(gender=gender, betas=pred_shape)
+        pred_reposed_vertices = pred_reposed_smpl_output.vertices
+
+        # ---------------- LOSS ----------------
+        # Concatenate target pose and global rotmats for loss function
+        target_pose_rotmats = torch.cat([target_glob_rotmats, target_pose_rotmats],
+                                        dim=1)
+        # Check joints visibility
+        target_joints2d_vis_coco = check_joints2d_visibility_torch(target_joints2d_coco,
+                                                                   config.REGRESSOR_IMG_WH)
+
+        pred_dict_for_loss = {'joints2D': pred_joints2d_coco,
+                              'verts': pred_vertices,
+                              'shape_params': pred_shape,
+                              'pose_params_rot_matrices': pred_pose_rotmats,
+                              'joints3D': pred_joints_h36mlsp}
+        target_dict_for_loss = {'joints2D': target_joints2d_coco,
+                                'verts': target_vertices,
+                                'shape_params': target_shape,
+                                'pose_params_rot_matrices': target_pose_rotmats,
+                                'joints3D': target_joints_h36mlsp,
+                                'vis': target_joints2d_vis_coco}
+
+        # ---------------- BACKWARD PASS ----------------
+        optimiser.zero_grad()
+        loss, task_losses_dict = criterion(target_dict_for_loss, pred_dict_for_loss)
+        loss.backward()
+        optimiser.step()
+
+        # ---------------- TRACK LOSS AND METRICS ----------------
+        metrics_tracker.update_per_batch('train', loss, task_losses_dict,
+                                         pred_dict_for_loss, target_dict_for_loss,
+                                         num_train_inputs_in_batch,
+                                         pred_reposed_vertices=pred_reposed_vertices,
+                                         target_reposed_vertices=target_reposed_vertices)
+
+        if total_step % 10 == 0:
+            save_dict = {'epoch': epoch,
+                         'best_epoch': best_epoch,
+                         'best_epoch_val_metrics': best_epoch_val_metrics,
+                         'model_state_dict': regressor.state_dict(),
+                         'best_model_state_dict': best_model_wts,
+                         'optimiser_state_dict': optimiser.state_dict(),
+                         'criterion_state_dict': criterion.state_dict()}
+            torch.save(save_dict,
+                       model_save_path + '_running_model.tar')
+
+            metrics_tracker.plot_intermediate_loss()
+
+        total_step += 1
+
+
+def validate_epoch(device,
+              val_dataloader,
+              metrics_tracker,
+              regressor,
+              smpl_model,
+              nmr_parts_renderer,
+              criterion,
+              bbox_augment_params,
+              mean_cam_t,
+              cam_K,
+              cam_R):
+    with torch.no_grad():
+        for batch_num, samples_batch in enumerate(tqdm(val_dataloader)):
+            # ---------------- SYNTHETIC DATA GENERATION ----------------
+            # TARGET SMPL PARAMETERS
+            target_pose = samples_batch['pose']
+            target_shape = samples_batch['shape']
+            gender = torch.randint(0, 2, (len(target_pose),)).to(device)
+            target_pose = target_pose.to(device)
+            target_shape = target_shape.to(device)
+            num_val_inputs_in_batch = target_pose.shape[0]  # Same as bs since drop_last=True
+
+            # TARGET VERTICES AND JOINTS
+            target_smpl_output = smpl_model(gender=gender,
+                                            body_pose=target_pose[:, 3:],
+                                            global_orient=target_pose[:, :3],
+                                            betas=target_shape)
+            target_vertices = target_smpl_output.vertices
+            target_joints_all = target_smpl_output.joints
+            target_joints_h36m = target_joints_all[:, config.ALL_JOINTS_TO_H36M_MAP, :]
+            target_joints_h36mlsp = target_joints_h36m[:, config.H36M_TO_J14, :]
+            target_joints_coco = target_joints_all[:, config.ALL_JOINTS_TO_COCO_MAP, :]
+            target_joints2d_coco = perspective_project_torch(target_joints_coco, cam_R,
+                                                             mean_cam_t,
+                                                             cam_K=cam_K)
+            target_reposed_smpl_output = smpl_model(gender=gender, betas=target_shape)
+            target_reposed_vertices = target_reposed_smpl_output.vertices
+
+            # INPUT PROXY REPRESENTATION GENERATION
+            input = nmr_parts_renderer(target_vertices, mean_cam_t)
+
+            # BBOX AUGMENTATION AND CROPPING
+            if bbox_augment_params['crop_input']:  # Crop inputs according to bounding box
+                input = input.cpu().detach().numpy()
+                target_joints2d_coco = target_joints2d_coco.cpu().detach().numpy()
+                all_cropped_segs, all_cropped_joints2D = batch_crop_seg_to_bounding_box(
+                    input, target_joints2d_coco,
+                    orig_scale_factor=bbox_augment_params['mean_scale_factor'],
+                    delta_scale_range=None,
+                    delta_centre_range=None)
+                resized_input, resized_joints2D = batch_resize(all_cropped_segs,
+                                                               all_cropped_joints2D,
+                                                               config.REGRESSOR_IMG_WH)
+                input = torch.from_numpy(resized_input).float().to(device)
+                target_joints2d_coco = torch.from_numpy(resized_joints2D).float().to(device)
+
+            # FINAL INPUT PROXY REPRESENTATION GENERATION WITH JOINT HEATMAPS
+            input = convert_multiclass_to_binary_labels_torch(input)
+            input = input.unsqueeze(1)
+            j2d_heatmaps = convert_2Djoints_to_gaussian_heatmaps_torch(target_joints2d_coco,
+                                                                       config.REGRESSOR_IMG_WH)
+            input = torch.cat([input, j2d_heatmaps], dim=1)
+
+            # ---------------- FORWARD PASS ----------------
+            pred_cam_wp, pred_pose, pred_shape = regressor(input, gender)
+            # Convert pred pose to rotation matrices
+            if pred_pose.shape[-1] == 24 * 3:
+                pred_pose_rotmats = batch_rodrigues(pred_pose.contiguous().view(-1, 3))
+                pred_pose_rotmats = pred_pose_rotmats.view(-1, 24, 3, 3)
+            elif pred_pose.shape[-1] == 24 * 6:
+                pred_pose_rotmats = rot6d_to_rotmat(pred_pose.contiguous()).view(-1, 24, 3, 3)
+
+            # PREDICTED VERTICES AND JOINTS
+            pred_smpl_output = smpl_model(gender=gender,
+                                          body_pose=pred_pose_rotmats[:, 1:],
+                                          global_orient=pred_pose_rotmats[:, 0].unsqueeze(1),
+                                          betas=pred_shape,
+                                          pose2rot=False)
+            pred_vertices = pred_smpl_output.vertices
+            pred_joints_all = pred_smpl_output.joints
+            pred_joints_h36m = pred_joints_all[:, config.ALL_JOINTS_TO_H36M_MAP, :]
+            pred_joints_h36mlsp = pred_joints_h36m[:, config.H36M_TO_J14, :]
+            pred_joints_coco = pred_joints_all[:, config.ALL_JOINTS_TO_COCO_MAP, :]
+            pred_joints2d_coco = orthographic_project_torch(pred_joints_coco, pred_cam_wp)
+            pred_reposed_smpl_output = smpl_model(gender=gender, betas=pred_shape)
+            pred_reposed_vertices = pred_reposed_smpl_output.vertices
+
+            # ---------------- LOSS ----------------
+            # Convert pose parameters to rotation matrices for loss function
+            target_pose_rotmats = batch_rodrigues(target_pose.contiguous().view(-1, 3))
+            target_pose_rotmats = target_pose_rotmats.view(-1, 24, 3, 3)
+
+            # Check joints visibility
+            target_joints2d_vis_coco = check_joints2d_visibility_torch(target_joints2d_coco, config.REGRESSOR_IMG_WH)
+
+            pred_dict_for_loss = {'joints2D': pred_joints2d_coco,
+                                  'verts': pred_vertices,
+                                  'shape_params': pred_shape,
+                                  'pose_params_rot_matrices': pred_pose_rotmats,
+                                  'joints3D': pred_joints_h36mlsp}
+            target_dict_for_loss = {'joints2D': target_joints2d_coco,
+                                    'verts': target_vertices,
+                                    'shape_params': target_shape,
+                                    'pose_params_rot_matrices': target_pose_rotmats,
+                                    'joints3D': target_joints_h36mlsp,
+                                    'vis': target_joints2d_vis_coco}
+
+            val_loss, val_task_losses_dict = criterion(target_dict_for_loss,
+                                                       pred_dict_for_loss)
+
+            # ---------------- TRACK LOSS AND METRICS ----------------
+            metrics_tracker.update_per_batch('val', val_loss, val_task_losses_dict,
+                                             pred_dict_for_loss, target_dict_for_loss,
+                                             num_val_inputs_in_batch,
+                                             pred_reposed_vertices=pred_reposed_vertices,
+                                             target_reposed_vertices=target_reposed_vertices)
 
 
 def train_synthetic_otf_rendering(device,
@@ -97,6 +408,7 @@ def train_synthetic_otf_rendering(device,
     mean_shape = torch.from_numpy(mean_smpl['shape']).float().to(device)
 
     # Starting training loop
+    total_step = 0
     for epoch in range(current_epoch, num_epochs):
         print('\nEpoch {}/{}'.format(epoch, num_epochs - 1))
         print('-' * 10)
@@ -107,246 +419,43 @@ def train_synthetic_otf_rendering(device,
         # ################################################################################
         print('Training.')
         regressor.train()
-        for batch_num, samples_batch in enumerate(tqdm(train_dataloader)):
-            # ---------------- SYNTHETIC DATA GENERATION ----------------
-            with torch.no_grad():
-                # TARGET SMPL PARAMETERS
-                target_pose = samples_batch['pose']
-                target_shape = samples_batch['shape']
-                target_pose = target_pose.to(device)
-                target_shape = target_shape.to(device)
-                num_train_inputs_in_batch = target_pose.shape[0]  # Same as bs since drop_last=True
-
-                # SMPL AND CAM AUGMENTATION
-                target_shape, target_pose_rotmats, target_glob_rotmats = augment_smpl(
-                    target_shape,
-                    target_pose[:, 3:],
-                    target_pose[:, :3],
+        train_epoch(device,
+                    train_dataloader,
                     mean_shape,
-                    smpl_augment_params)
-                target_cam_t = augment_cam_t(mean_cam_t,
-                                             xy_std=cam_augment_params['xy_std'],
-                                             delta_z_range=cam_augment_params['delta_z_range'])
-
-                # TARGET VERTICES AND JOINTS
-                target_smpl_output = smpl_model(body_pose=target_pose_rotmats,
-                                                global_orient=target_glob_rotmats,
-                                                betas=target_shape,
-                                                pose2rot=False)
-                target_vertices = target_smpl_output.vertices
-                target_joints_all = target_smpl_output.joints
-                target_joints_h36m = target_joints_all[:, config.ALL_JOINTS_TO_H36M_MAP, :]
-                target_joints_h36mlsp = target_joints_h36m[:, config.H36M_TO_J14, :]
-                target_joints_coco = target_joints_all[:, config.ALL_JOINTS_TO_COCO_MAP, :]
-                target_joints2d_coco = perspective_project_torch(target_joints_coco, cam_R,
-                                                                 target_cam_t,
-                                                                 cam_K=cam_K)
-                target_reposed_smpl_output = smpl_model(betas=target_shape)
-                target_reposed_vertices = target_reposed_smpl_output.vertices
-
-                if proxy_rep_augment_params['deviate_verts2D']:
-                    # Vertex noise augmentation to give noisy proxy representation edges
-                    target_vertices_for_rendering = random_verts2D_deviation(target_vertices,
-                                                                             delta_verts2d_dev_range=proxy_rep_augment_params['delta_verts2d_dev_range'])
-                else:
-                    target_vertices_for_rendering = target_vertices
-
-                # INPUT PROXY REPRESENTATION GENERATION
-                input = nmr_parts_renderer(target_vertices_for_rendering, target_cam_t)
-
-                # BBOX AUGMENTATION AND CROPPING
-                if bbox_augment_params['crop_input']:
-                    # Crop inputs according to bounding box
-                    # + add random scale and centre augmentation
-                    input = input.cpu().detach().numpy()
-                    target_joints2d_coco = target_joints2d_coco.cpu().detach().numpy()
-                    all_cropped_segs, all_cropped_joints2D = batch_crop_seg_to_bounding_box(
-                        input, target_joints2d_coco,
-                        orig_scale_factor=bbox_augment_params['mean_scale_factor'],
-                        delta_scale_range=bbox_augment_params['delta_scale_range'],
-                        delta_centre_range=bbox_augment_params['delta_centre_range'])
-                    resized_input, resized_joints2D = batch_resize(all_cropped_segs, all_cropped_joints2D, config.REGRESSOR_IMG_WH)
-                    input = torch.from_numpy(resized_input).float().to(device)
-                    target_joints2d_coco = torch.from_numpy(resized_joints2D).float().to(device)
-
-                # PROXY REPRESENTATION AUGMENTATION
-                input, target_joints2d_coco_input = augment_proxy_representation(input,
-                                                                                 target_joints2d_coco,
-                                                                                 proxy_rep_augment_params)
-
-                # FINAL INPUT PROXY REPRESENTATION GENERATION WITH JOINT HEATMAPS
-                input = convert_multiclass_to_binary_labels_torch(input)
-                input = input.unsqueeze(1)
-                j2d_heatmaps = convert_2Djoints_to_gaussian_heatmaps_torch(target_joints2d_coco_input,
-                                                                           config.REGRESSOR_IMG_WH)
-                input = torch.cat([input, j2d_heatmaps], dim=1)
-
-            # ---------------- FORWARD PASS ----------------
-            # (gradients being computed from here on)
-            pred_cam_wp, pred_pose, pred_shape = regressor(input)
-
-            # Convert pred pose to rotation matrices
-            if pred_pose.shape[-1] == 24*3:
-                pred_pose_rotmats = batch_rodrigues(pred_pose.contiguous().view(-1, 3))
-                pred_pose_rotmats = pred_pose_rotmats.view(-1, 24, 3, 3)
-            elif pred_pose.shape[-1] == 24*6:
-                pred_pose_rotmats = rot6d_to_rotmat(pred_pose.contiguous()).view(-1, 24, 3, 3)
-
-            # PREDICTED VERTICES AND JOINTS
-            pred_smpl_output = smpl_model(body_pose=pred_pose_rotmats[:, 1:],
-                                          global_orient=pred_pose_rotmats[:, 0].unsqueeze(1),
-                                          betas=pred_shape,
-                                          pose2rot=False)
-            pred_vertices = pred_smpl_output.vertices
-            pred_joints_all = pred_smpl_output.joints
-            pred_joints_h36m = pred_joints_all[:, config.ALL_JOINTS_TO_H36M_MAP, :]
-            pred_joints_h36mlsp = pred_joints_h36m[:, config.H36M_TO_J14, :]
-            pred_joints_coco = pred_joints_all[:, config.ALL_JOINTS_TO_COCO_MAP, :]
-            pred_joints2d_coco = orthographic_project_torch(pred_joints_coco, pred_cam_wp)
-            pred_reposed_smpl_output = smpl_model(betas=pred_shape)
-            pred_reposed_vertices = pred_reposed_smpl_output.vertices
-
-            # ---------------- LOSS ----------------
-            # Concatenate target pose and global rotmats for loss function
-            target_pose_rotmats = torch.cat([target_glob_rotmats, target_pose_rotmats],
-                                            dim=1)
-            # Check joints visibility
-            target_joints2d_vis_coco = check_joints2d_visibility_torch(target_joints2d_coco,
-                                                                       config.REGRESSOR_IMG_WH)
-
-            pred_dict_for_loss = {'joints2D': pred_joints2d_coco,
-                                  'verts': pred_vertices,
-                                  'shape_params': pred_shape,
-                                  'pose_params_rot_matrices': pred_pose_rotmats,
-                                  'joints3D': pred_joints_h36mlsp}
-            target_dict_for_loss = {'joints2D': target_joints2d_coco,
-                                    'verts': target_vertices,
-                                    'shape_params': target_shape,
-                                    'pose_params_rot_matrices': target_pose_rotmats,
-                                    'joints3D': target_joints_h36mlsp,
-                                    'vis': target_joints2d_vis_coco}
-
-            # ---------------- BACKWARD PASS ----------------
-            optimiser.zero_grad()
-            loss, task_losses_dict = criterion(target_dict_for_loss, pred_dict_for_loss)
-            loss.backward()
-            optimiser.step()
-
-            # ---------------- TRACK LOSS AND METRICS ----------------
-            metrics_tracker.update_per_batch('train', loss, task_losses_dict,
-                                             pred_dict_for_loss, target_dict_for_loss,
-                                             num_train_inputs_in_batch,
-                                             pred_reposed_vertices=pred_reposed_vertices,
-                                             target_reposed_vertices=target_reposed_vertices)
-
+                    epoch,
+                    best_epoch,
+                    best_epoch_val_metrics,
+                    best_model_wts,
+                    metrics_tracker,
+                    regressor,
+                    smpl_model,
+                    nmr_parts_renderer,
+                    criterion,
+                    optimiser,
+                    smpl_augment_params,
+                    cam_augment_params,
+                    bbox_augment_params,
+                    proxy_rep_augment_params,
+                    mean_cam_t,
+                    cam_K,
+                    cam_R,
+                    model_save_path)
         # ##################################################################################
         # ----------------------------------- VALIDATION -----------------------------------
         # ##################################################################################
         print('Validation.')
         regressor.eval()
-        with torch.no_grad():
-            for batch_num, samples_batch in enumerate(tqdm(val_dataloader)):
-                # ---------------- SYNTHETIC DATA GENERATION ----------------
-                # TARGET SMPL PARAMETERS
-                target_pose = samples_batch['pose']
-                target_shape = samples_batch['shape']
-                target_pose = target_pose.to(device)
-                target_shape = target_shape.to(device)
-                num_val_inputs_in_batch = target_pose.shape[0]  # Same as bs since drop_last=True
-
-                # TARGET VERTICES AND JOINTS
-                target_smpl_output = smpl_model(body_pose=target_pose[:, 3:],
-                                                global_orient=target_pose[:, :3],
-                                                betas=target_shape)
-                target_vertices = target_smpl_output.vertices
-                target_joints_all = target_smpl_output.joints
-                target_joints_h36m = target_joints_all[:, config.ALL_JOINTS_TO_H36M_MAP, :]
-                target_joints_h36mlsp = target_joints_h36m[:, config.H36M_TO_J14, :]
-                target_joints_coco = target_joints_all[:, config.ALL_JOINTS_TO_COCO_MAP, :]
-                target_joints2d_coco = perspective_project_torch(target_joints_coco, cam_R,
-                                                                 mean_cam_t,
-                                                                 cam_K=cam_K)
-                target_reposed_smpl_output = smpl_model(betas=target_shape)
-                target_reposed_vertices = target_reposed_smpl_output.vertices
-
-                # INPUT PROXY REPRESENTATION GENERATION
-                input = nmr_parts_renderer(target_vertices, mean_cam_t)
-
-                # BBOX AUGMENTATION AND CROPPING
-                if bbox_augment_params['crop_input']:  # Crop inputs according to bounding box
-                    input = input.cpu().detach().numpy()
-                    target_joints2d_coco = target_joints2d_coco.cpu().detach().numpy()
-                    all_cropped_segs, all_cropped_joints2D = batch_crop_seg_to_bounding_box(
-                        input, target_joints2d_coco,
-                        orig_scale_factor=bbox_augment_params['mean_scale_factor'],
-                        delta_scale_range=None,
-                        delta_centre_range=None)
-                    resized_input, resized_joints2D = batch_resize(all_cropped_segs,
-                                                                   all_cropped_joints2D,
-                                                                   config.REGRESSOR_IMG_WH)
-                    input = torch.from_numpy(resized_input).float().to(device)
-                    target_joints2d_coco = torch.from_numpy(resized_joints2D).float().to(device)
-
-                # FINAL INPUT PROXY REPRESENTATION GENERATION WITH JOINT HEATMAPS
-                input = convert_multiclass_to_binary_labels_torch(input)
-                input = input.unsqueeze(1)
-                j2d_heatmaps = convert_2Djoints_to_gaussian_heatmaps_torch(target_joints2d_coco,
-                                                                           config.REGRESSOR_IMG_WH)
-                input = torch.cat([input, j2d_heatmaps], dim=1)
-
-                # ---------------- FORWARD PASS ----------------
-                pred_cam_wp, pred_pose, pred_shape = regressor(input)
-                # Convert pred pose to rotation matrices
-                if pred_pose.shape[-1] == 24 * 3:
-                    pred_pose_rotmats = batch_rodrigues(pred_pose.contiguous().view(-1, 3))
-                    pred_pose_rotmats = pred_pose_rotmats.view(-1, 24, 3, 3)
-                elif pred_pose.shape[-1] == 24 * 6:
-                    pred_pose_rotmats = rot6d_to_rotmat(pred_pose.contiguous()).view(-1, 24, 3, 3)
-
-                # PREDICTED VERTICES AND JOINTS
-                pred_smpl_output = smpl_model(body_pose=pred_pose_rotmats[:, 1:],
-                                              global_orient=pred_pose_rotmats[:, 0].unsqueeze(1),
-                                              betas=pred_shape,
-                                              pose2rot=False)
-                pred_vertices = pred_smpl_output.vertices
-                pred_joints_all = pred_smpl_output.joints
-                pred_joints_h36m = pred_joints_all[:, config.ALL_JOINTS_TO_H36M_MAP, :]
-                pred_joints_h36mlsp = pred_joints_h36m[:, config.H36M_TO_J14, :]
-                pred_joints_coco = pred_joints_all[:, config.ALL_JOINTS_TO_COCO_MAP, :]
-                pred_joints2d_coco = orthographic_project_torch(pred_joints_coco, pred_cam_wp)
-                pred_reposed_smpl_output = smpl_model(betas=pred_shape)
-                pred_reposed_vertices = pred_reposed_smpl_output.vertices
-
-                # ---------------- LOSS ----------------
-                # Convert pose parameters to rotation matrices for loss function
-                target_pose_rotmats = batch_rodrigues(target_pose.contiguous().view(-1, 3))
-                target_pose_rotmats = target_pose_rotmats.view(-1, 24, 3, 3)
-
-                # Check joints visibility
-                target_joints2d_vis_coco = check_joints2d_visibility_torch(target_joints2d_coco, config.REGRESSOR_IMG_WH)
-
-                pred_dict_for_loss = {'joints2D': pred_joints2d_coco,
-                                      'verts': pred_vertices,
-                                      'shape_params': pred_shape,
-                                      'pose_params_rot_matrices': pred_pose_rotmats,
-                                      'joints3D': pred_joints_h36mlsp}
-                target_dict_for_loss = {'joints2D': target_joints2d_coco,
-                                        'verts': target_vertices,
-                                        'shape_params': target_shape,
-                                        'pose_params_rot_matrices': target_pose_rotmats,
-                                        'joints3D': target_joints_h36mlsp,
-                                        'vis': target_joints2d_vis_coco}
-
-                val_loss, val_task_losses_dict = criterion(target_dict_for_loss,
-                                                           pred_dict_for_loss)
-
-                # ---------------- TRACK LOSS AND METRICS ----------------
-                metrics_tracker.update_per_batch('val', val_loss, val_task_losses_dict,
-                                                 pred_dict_for_loss, target_dict_for_loss,
-                                                 num_val_inputs_in_batch,
-                                                 pred_reposed_vertices=pred_reposed_vertices,
-                                                 target_reposed_vertices=target_reposed_vertices)
-
+        validate_epoch(device,
+                       val_dataloader,
+                       metrics_tracker,
+                       regressor,
+                       smpl_model,
+                       nmr_parts_renderer,
+                       criterion,
+                       bbox_augment_params,
+                       mean_cam_t,
+                       cam_K,
+                       cam_R)
         # ----------------------- UPDATING LOSS AND METRICS HISTORY -----------------------
         metrics_tracker.update_per_epoch()
 
@@ -378,6 +487,12 @@ def train_synthetic_otf_rendering(device,
             print('Model saved! Best Val Metrics:\n',
                   best_epoch_val_metrics,
                   '\nin epoch {}'.format(best_epoch))
+
+        predict_3D(os.path.join(os.path.dirname(__file__),'..', 'demo'),
+                   regressor, torch.device("cpu"),
+                   silhouettes_from='sam',
+                   outpath=model_save_path + f'test_epoch{epoch}')
+
 
     print('Training Completed. Best Val Metrics:\n',
           best_epoch_val_metrics)

@@ -1,6 +1,9 @@
+import os
+
 import numpy as np
 import pickle
 
+from matplotlib import pyplot as plt
 from utils.eval_utils import procrustes_analysis_batch, scale_and_translation_transform_batch
 from utils.joints2d_utils import undo_keypoint_normalisation
 
@@ -40,7 +43,7 @@ class TrainingLossesAndMetricsTracker:
         if load_logs:
             self.history = self.load_history(log_path, current_epoch)
         else:
-            self.history = {'train_losses': [], 'val_losses': []}
+            self.history = {'train_losses': [], 'val_losses': [], 'intermediate': []}
             for loss_type in self.all_per_task_loss_types:
                 self.history[loss_type] = []
             for metric_type in self.all_metrics_types:
@@ -212,11 +215,26 @@ class TrainingLossesAndMetricsTracker:
                                                 axis=-1)  # (bsize, num_joints)
             self.loss_metric_sums[split + '_joints2D_l2es'] += np.sum(joints2D_l2e_batch)  # scalar
 
+    def plot_intermediate_loss(self):
+        self.history['intermediate'].append(self.loss_metric_sums['train_losses'] /
+                                            self.loss_metric_sums['train_num_samples'])
+        plt.plot(range(len(self.history['intermediate'])), self.history['intermediate'], label='train', color='r')
+
+        plt.legend()
+        plt.savefig(os.path.join(os.path.dirname(self.log_path), "losses_intermediate.png"))
+        plt.clf()
+
     def update_per_epoch(self):
         self.history['train_losses'].append(self.loss_metric_sums['train_losses'] /
                                             self.loss_metric_sums['train_num_samples'])
         self.history['val_losses'].append(self.loss_metric_sums['val_losses'] /
                                           self.loss_metric_sums['val_num_samples'])
+
+        plt.plot(range(len(self.history['train_losses'])), self.history['train_losses'], label='train', color='r')
+        plt.plot(range(len(self.history['val_losses'])), self.history['val_losses'], label='val', color='b')
+        plt.legend()
+        plt.savefig(os.path.join(os.path.dirname(self.log_path), "losses.png"))
+        plt.clf()
 
         # For each task, if tracking per-task loss, append loss per sample for current epoch
         # to loss history. Else, append 0.

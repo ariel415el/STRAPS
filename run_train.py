@@ -1,4 +1,6 @@
 import os
+from random import random
+
 import torch
 import numpy as np
 import torch.optim as optim
@@ -18,12 +20,15 @@ from utils.cam_utils import get_intrinsics_matrix
 
 from train.train_synthetic_otf_rendering import train_synthetic_otf_rendering
 
-
+torch.manual_seed(0)
+np.random.seed(0)
+# random.seed(0)
 # ----------------------- Device -----------------------
 gpu = "0"
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = gpu
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cpu")
 print('\nDevice: {}'.format(device))
 print('GPU:', gpu)
 
@@ -41,7 +46,7 @@ print("IEF Num iters:", ief_iters)
 
 # ----------------------- Hyperparameters -----------------------
 num_epochs = 100
-batch_size = 140
+batch_size = 100
 lr = 0.0001
 epochs_per_save = 10
 print("\nBatch size:", batch_size)
@@ -71,13 +76,15 @@ print("Save val metrics:", save_val_metrics)
 # Path to npz with training data.
 train_path = 'data/amass_up3d_3dpw_train.npz'
 # Path to npz with validation data.
-val_path = 'data/up3d_3dpw_val.npz'
+# val_path = 'data/up3d_3dpw_val.npz'
+val_path = train_path
 
+out_name = 'model_training_no_with_gender'
 # Path to save model weights to (without .tar extension).
-model_save_path = os.path.join('./checkpoints/model_training/straps_model_checkpoint_exp001')
-log_path = os.path.join('./logs/straps_model_logs_exp001.pkl')
-if not os.path.isdir('./checkpoints/model_training'):
-    os.makedirs('./checkpoints/model_training')
+model_save_path = os.path.join(f'checkpoints/{out_name}/straps_model_checkpoint_exp001')
+log_path = os.path.join(f'checkpoints/{out_name}/straps_model_logs_exp001.pkl')
+if not os.path.isdir(f'checkpoints/{out_name}'):
+    os.makedirs(f'checkpoints/{out_name}')
 if not os.path.isdir('./logs'):
     os.makedirs('./logs')
 
@@ -94,7 +101,11 @@ print("Log save path:", log_path)
 
 # ----------------------- Dataset -----------------------
 train_dataset = SyntheticTrainingDataset(npz_path=train_path, params_from='all')
-val_dataset = SyntheticTrainingDataset(npz_path=val_path, params_from='all')
+
+n = len(train_dataset)
+val_size = int(0.01*n)
+train_dataset, val_dataset = torch.utils.data.random_split(train_dataset, [n - val_size, val_size])
+# train_dataset = val_dataset
 train_val_monitor_datasets = [train_dataset, val_dataset]
 print("Training examples found:", len(train_dataset))
 print("Validation examples found:", len(val_dataset))
@@ -106,8 +117,7 @@ num_params = count_parameters(regressor)
 print("\nRegressor model Loaded. ", num_params, "trainable parameters.")
 
 # SMPL model
-smpl_model = SMPL(config.SMPL_MODEL_DIR,
-                  batch_size=batch_size)
+smpl_model = SMPL(config.SMPL_MODEL_DIR, batch_size=batch_size)
 
 # Camera and NMR part/silhouette renderer
 # Assuming camera rotation is identity (since it is dealt with by global_orients in SMPL)
@@ -133,8 +143,8 @@ nmr_parts_renderer.to(device)
 # SMPL
 augment_shape = True
 delta_betas_distribution = 'normal'
-delta_betas_std_vector = torch.tensor([1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5],
-                                      device=device).float()  # used if delta_betas_distribution is 'normal'
+betas_std = 1.5
+delta_betas_std_vector = torch.tensor(10 * [betas_std],  device=device).float()  # used if delta_betas_distribution is 'normal'
 delta_betas_range = [-3., 3.]  # used if delta_betas_distribution is 'uniform'
 smpl_augment_params = {'augment_shape': augment_shape,
                        'delta_betas_distribution': delta_betas_distribution,
@@ -146,7 +156,7 @@ delta_z_range = [-5, 5]
 cam_augment_params = {'xy_std': xy_std,
                       'delta_z_range': delta_z_range}
 # BBox
-crop_input = True
+crop_input = True # ARiel: shift and rescale augmentation
 mean_scale_factor = 1.2
 delta_scale_range = [-0.2, 0.2]
 delta_centre_range = [-5, 5]
@@ -157,14 +167,14 @@ bbox_augment_params = {'crop_input': crop_input,
 # Proxy Representation
 remove_appendages = True
 deviate_joints2D = True
-deviate_verts2D = True
-occlude_seg = True
+deviate_verts2D = True # TODO Ariel I changed this to False
+occlude_seg = False
 
 remove_appendages_classes = [1, 2, 3, 4, 5, 6]
 remove_appendages_probabilities = [0.1, 0.1, 0.1, 0.1, 0.05, 0.05]
 delta_j2d_dev_range = [-8, 8]
 delta_j2d_hip_dev_range = [-8, 8]
-delta_verts2d_dev_range = [-0.01, 0.01]
+delta_verts2d_dev_range = [-0.01, 0.01] # [-0.0025, 0.0025] # TODO Ariel I changed this from [-0.01, 0.01]
 occlude_probability = 0.5
 occlude_box_dim = 48
 

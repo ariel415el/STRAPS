@@ -90,8 +90,8 @@ class Renderer():
 
         material = pyrender.MetallicRoughnessMaterial(
             metallicFactor=0.2,
-            alphaMode='OPAQUE',
-            baseColorFactor=(color[0], color[1], color[2], 1.0)
+            # alphaMode='OPAQUE',
+            baseColorFactor=(color[0], color[1], color[2], 0.5)
         )
 
         mesh = pyrender.Mesh.from_trimesh(mesh, material=material)
@@ -116,3 +116,29 @@ class Renderer():
             self.scene.remove_node(cam_node)
 
             return image
+
+
+def interactive_render(verts, cam):
+    color = [0.8, 0.3, 0.3]
+    faces = np.load(config.SMPL_FACES_PATH)
+    mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+    Rx = trimesh.transformations.rotation_matrix(math.radians(180), [1, 0, 0])
+    mesh.apply_transform(Rx)
+
+    material = pyrender.MetallicRoughnessMaterial(
+        metallicFactor=0.2,
+        # alphaMode='OPAQUE',
+        baseColorFactor=(color[0], color[1], color[2], 0.5)
+    )
+
+    mesh = pyrender.Mesh.from_trimesh(mesh, material=material)
+
+    scene = pyrender.Scene()
+    scene.add(mesh)
+
+    # Add a light to the scene
+    light = pyrender.DirectionalLight(color=np.ones(3), intensity=2.0)
+    scene.add(light)
+
+    # Render the scene in an interactive viewer
+    viewer = pyrender.Viewer(scene, use_raymond_lighting=True, run_in_thread=False)

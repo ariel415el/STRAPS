@@ -5,6 +5,8 @@ import torch
 from models.regressor import SingleInputRegressor
 from predict.predict_3D import predict_3D
 
+
+
 def main(input_path, checkpoint_path, device, silhouettes_from):
     regressor = SingleInputRegressor(resnet_in_channels=18,
                                      resnet_layers=18,
@@ -23,13 +25,14 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--input', type=str, help='Path to input image/folder of images.')
     parser.add_argument('--checkpoint', type=str, help='Path to model checkpoint')
-    parser.add_argument('--silh_from', choices=['densepose', 'pointrend'])
+    parser.add_argument('--silh_from', choices=['detectron2', 'sam'], default='sam')
     parser.add_argument('--gpu', default='0')
     args = parser.parse_args()
 
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"  # see issue #152
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu")
 
     # Regarding body mesh visualisation using pyrender:
     # If you are running this script on a remote machine via ssh, you might need to use EGL

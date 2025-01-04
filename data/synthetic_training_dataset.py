@@ -14,7 +14,7 @@ class SyntheticTrainingDataset(Dataset):
     """
     def __init__(self,
                  npz_path,
-                 params_from='all'):
+                 params_from='all', limit=None):
 
         assert params_from in ['all', 'h36m', 'up3d', '3dpw', 'not_amass']
 
@@ -22,6 +22,10 @@ class SyntheticTrainingDataset(Dataset):
         self.fnames = data['fnames']
         self.poses = data['poses']
         self.shapes = data['shapes']
+        if limit is not None:
+            self.fnames = self.fnames[:limit]
+            self.poses = self.poses[:limit]
+            self.shapes = self.shapes[:limit]
 
         if params_from != 'all':
             if params_from == 'not_amass':
