@@ -160,7 +160,7 @@ def predict_3D(input,
             # Predict 3D
             regressor.eval()
             with torch.no_grad():
-                pred_cam_wp, pred_pose, pred_shape = regressor.cpu()(proxy_rep, gender) # TODO load gender
+                pred_cam_wp, pred_pose, pred_shape = regressor(proxy_rep, gender) # TODO load gender
                 # Convert pred pose to rotation matrices
                 if pred_pose.shape[-1] == 24 * 3:
                     pred_pose_rotmats = batch_rodrigues(pred_pose.contiguous().view(-1, 3))

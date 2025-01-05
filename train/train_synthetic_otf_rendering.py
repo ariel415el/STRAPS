@@ -489,10 +489,10 @@ def train_synthetic_otf_rendering(device,
                   '\nin epoch {}'.format(best_epoch))
 
         predict_3D(os.path.join(os.path.dirname(__file__),'..', 'demo'),
-                   regressor, torch.device("cpu"),
+                   regressor.cpu(), torch.device("cpu"),
                    silhouettes_from='sam',
                    outpath=model_save_path + f'test_epoch{epoch}')
-
+        regressor.to(device)
 
     print('Training Completed. Best Val Metrics:\n',
           best_epoch_val_metrics)
