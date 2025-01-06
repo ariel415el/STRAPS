@@ -7,13 +7,14 @@ from smplx.lbs import vertices2joints
 import config
 
 
-class SMPL(_SMPL):
+class SMPL(torch.nn.Module):
     """
     Extension of the official SMPL (from the smplx python package) implementation to
     support more joints.
     """
     def __init__(self, *args, **kwargs):
-        super(SMPL, self).__init__(*args, **kwargs)
+        super().__init__()
+        # super(SMPL, self).__init__(*args, **kwargs)
         self.male_model = _SMPL(*args, **kwargs, gender='male')
         self.female_model = _SMPL(*args, **kwargs, gender='female')
         J_regressor_extra = np.load(config.J_REGRESSOR_EXTRA_PATH)

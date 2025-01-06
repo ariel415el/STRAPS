@@ -1,6 +1,6 @@
 # ------------------------ Paths ------------------------
 # Additional files
-SMPL_MODEL_DIR = '/mnt/storage_ssd/personal_projects/3d/SMPL_models/smpl_1.1'
+SMPL_MODEL_DIR = 'additional/SMPL'
 SMPL_FACES_PATH = 'additional/smpl_faces.npy'
 SMPL_MEAN_PARAMS_PATH = 'additional/neutral_smpl_mean_params_6dpose.npz'
 J_REGRESSOR_EXTRA_PATH = 'additional/J_regressor_extra.npy'

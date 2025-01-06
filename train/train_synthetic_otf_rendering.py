@@ -22,7 +22,6 @@ from augmentation.smpl_augmentation import augment_smpl
 from augmentation.cam_augmentation import augment_cam_t
 from augmentation.proxy_rep_augmentation import augment_proxy_representation, \
     random_verts2D_deviation
-from predict.predict_3D import predict_3D
 
 import config
 
@@ -488,10 +487,11 @@ def train_synthetic_otf_rendering(device,
                   best_epoch_val_metrics,
                   '\nin epoch {}'.format(best_epoch))
 
-        predict_3D(os.path.join(os.path.dirname(__file__),'..', 'demo'),
-                   regressor.cpu(), torch.device("cpu"),
-                   silhouettes_from='sam',
-                   outpath=model_save_path + f'test_epoch{epoch}')
+        # TODO: this causes some segfault
+        # predict_3D(os.path.join(os.path.dirname(__file__),'..', 'demo'),
+        #            regressor.cpu(), torch.device("cpu"),
+        #            silhouettes_from='sam',
+        #            outpath=model_save_path + f'test_epoch{epoch}')
         regressor.to(device)
 
     print('Training Completed. Best Val Metrics:\n',
