@@ -3,7 +3,7 @@ import torch.nn as nn
 import numpy as np
 
 import neural_renderer as nr
-import config
+import consts
 
 
 class NMRRenderer(nn.Module):
@@ -34,18 +34,18 @@ class NMRRenderer(nn.Module):
         """
         super(NMRRenderer, self).__init__()
 
-        faces = np.load(config.SMPL_FACES_PATH)
+        faces = np.load(consts.SMPL_FACES_PATH)
         faces = torch.from_numpy(faces.astype(np.int32))
         faces = faces[None, :].expand(batch_size, -1, -1)
         self.register_buffer('faces', faces)
 
         if rend_parts_seg:
-            textures = np.load(config.VERTEX_TEXTURE_PATH)
+            textures = np.load(consts.VERTEX_TEXTURE_PATH)
             textures = torch.from_numpy(textures).float()
             textures = textures.expand(batch_size, -1, -1, -1, -1, -1)
             self.register_buffer('textures', textures)
 
-            cube_parts = np.load(config.CUBE_PARTS_PATH)
+            cube_parts = np.load(consts.CUBE_PARTS_PATH)
             cube_parts = torch.from_numpy(cube_parts).float()
             self.register_buffer('cube_parts', cube_parts)
         else:

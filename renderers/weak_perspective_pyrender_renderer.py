@@ -7,7 +7,7 @@ import pyrender
 import numpy as np
 from pyrender.constants import RenderFlags
 
-import config
+import consts
 
 
 class WeakPerspectiveCamera(pyrender.Camera):
@@ -39,7 +39,7 @@ class Renderer():
     def __init__(self, resolution=(256, 256)):
         self.resolution = resolution
 
-        self.faces = np.load(config.SMPL_FACES_PATH)
+        self.faces = np.load(consts.SMPL_FACES_PATH)
         self.renderer = pyrender.OffscreenRenderer(
             viewport_width=self.resolution[0],
             viewport_height=self.resolution[1],
@@ -120,7 +120,7 @@ class Renderer():
 
 def interactive_render(verts, cam):
     color = [0.8, 0.3, 0.3]
-    faces = np.load(config.SMPL_FACES_PATH)
+    faces = np.load(consts.SMPL_FACES_PATH)
     mesh = trimesh.Trimesh(vertices=verts, faces=faces)
     Rx = trimesh.transformations.rotation_matrix(math.radians(180), [1, 0, 0])
     mesh.apply_transform(Rx)

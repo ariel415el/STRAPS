@@ -11,7 +11,7 @@ from detectron2.engine import DefaultPredictor
 from PointRend.point_rend import add_pointrend_config
 from DensePose.densepose import add_densepose_config
 
-import config
+import consts
 
 from predict.predict_joints2D import predict_joints2D
 from predict.predict_silhouette_pointrend import predict_silhouette_pointrend
@@ -107,7 +107,7 @@ def create_proxy_representation(silhouette,
     return proxy_rep
 
 
-def predict_3D(input,
+def predict_3D(opts, input,
                regressor,
                device,
                silhouettes_from='detectron2',
@@ -120,7 +120,7 @@ def predict_3D(input,
     joints2D_predictor, silhouette_predictor = setup_detectron2_predictors(silhouettes_from, device)
 
     # Set-up SMPL model.
-    smpl = SMPL(config.SMPL_MODEL_DIR, batch_size=1).to(device)
+    smpl = SMPL(consts.SMPL_MODEL_DIR, batch_size=1).to(device)
 
     if render_vis:
         # Set-up renderer for visualisation.
@@ -147,13 +147,13 @@ def predict_3D(input,
             # Crop around silhouette
             silhouette, joints2D, image = crop_and_resize_silhouette_joints(silhouette,
                                                                             joints2D,
-                                                                            out_wh=config.REGRESSOR_IMG_WH,
+                                                                            out_wh=opts.regressor_input_dim,
                                                                             image=image,
                                                                             image_out_wh=proxy_rep_input_wh,
                                                                             bbox_scale_factor=1.2)
             # Create proxy representation
             proxy_rep = create_proxy_representation(silhouette, joints2D,
-                                                    out_wh=config.REGRESSOR_IMG_WH)
+                                                    out_wh=opts.regressor_input_dim)
             proxy_rep = proxy_rep[None, :, :, :]  # add batch dimension
             proxy_rep = torch.from_numpy(proxy_rep).float().to(device)
 
@@ -190,14 +190,15 @@ def predict_3D(input,
                 outpath = input
             if not os.path.isdir(os.path.join(outpath, 'verts_vis')):
                 os.makedirs(os.path.join(outpath, 'verts_vis'))
-            plt.figure()
-            plt.imshow(image[:,:,::-1])
+            plt.figure(figsize=(5,5))
+            plt.imshow(silhouette_vis[..., :3])
             plt.scatter(pred_vertices2d[:, 0], pred_vertices2d[:, 1], s=0.3)
+            plt.tight_layout(pad=0)
             plt.gca().set_axis_off()
-            plt.subplots_adjust(top=1, bottom=0, right=1, left=0, hspace=0, wspace=0)
-            plt.margins(0, 0)
-            plt.gca().xaxis.set_major_locator(plt.NullLocator())
-            plt.gca().yaxis.set_major_locator(plt.NullLocator())
+            # plt.subplots_adjust(top=1, bottom=0, right=1, left=0, hspace=0, wspace=0)
+            # plt.margins(0, 0)
+            # plt.gca().xaxis.set_major_locator(plt.NullLocator())
+            # plt.gca().yaxis.set_major_locator(plt.NullLocator())
             plt.savefig(os.path.join(outpath, 'verts_vis', 'verts_'+fname))
 
             if render_vis:
@@ -229,4 +230,4 @@ def predict_3D(input,
                         f.write(f"f {' '.join(map(str, [index + 1 for index in face]))}\n")  #
 
             os.makedirs(os.path.join(outpath, 'objs'), exist_ok=True)
-            write_obj_file(pred_vertices, np.load(config.SMPL_FACES_PATH), os.path.join(outpath, 'objs', fname.split(".")[0]+".obj"))
+            write_obj_file(pred_vertices, np.load(consts.SMPL_FACES_PATH), os.path.join(outpath, 'objs', fname.split(".")[0]+".obj"))

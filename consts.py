@@ -8,12 +8,10 @@ COCOPLUS_REGRESSOR_PATH = 'additional/cocoplus_regressor.npy'
 H36M_REGRESSOR_PATH = 'additional/J_regressor_h36m.npy'
 VERTEX_TEXTURE_PATH = 'additional/vertex_texture.npy'
 CUBE_PARTS_PATH = 'additional/cube_parts.npy'
+TRAIN_DATA_PATH = 'data/amass_up3d_3dpw_train.npz'
+# val_path = 'data/up3d_3dpw_val.npz'
 
-# ------------------------ Constants ------------------------
-# FOCAL_LENGTH = 10000.
-# REGRESSOR_IMG_WH = 512
-FOCAL_LENGTH = 5000.
-REGRESSOR_IMG_WH = 256
+
 # ------------------------ Joint label conventions ------------------------
 # The SMPL model (im smpl_official.py) returns a large superset of joints.
 # Different subsets are used during training - e.g. H36M 3D joints convention and COCO 2D joints convention.

@@ -4,7 +4,7 @@ from smplx import SMPL as _SMPL
 from smplx.body_models import SMPLOutput
 from smplx.lbs import vertices2joints
 
-import config
+import consts
 
 
 class SMPL(torch.nn.Module):
@@ -17,9 +17,9 @@ class SMPL(torch.nn.Module):
         # super(SMPL, self).__init__(*args, **kwargs)
         self.male_model = _SMPL(*args, **kwargs, gender='male')
         self.female_model = _SMPL(*args, **kwargs, gender='female')
-        J_regressor_extra = np.load(config.J_REGRESSOR_EXTRA_PATH)
-        J_regressor_cocoplus = np.load(config.COCOPLUS_REGRESSOR_PATH)
-        J_regressor_h36m = np.load(config.H36M_REGRESSOR_PATH)
+        J_regressor_extra = np.load(consts.J_REGRESSOR_EXTRA_PATH)
+        J_regressor_cocoplus = np.load(consts.COCOPLUS_REGRESSOR_PATH)
+        J_regressor_h36m = np.load(consts.H36M_REGRESSOR_PATH)
         self.register_buffer('J_regressor_extra', torch.tensor(J_regressor_extra,
                                                                dtype=torch.float32))
         self.register_buffer('J_regressor_cocoplus', torch.tensor(J_regressor_cocoplus,

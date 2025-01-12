@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-import config
+import consts
 
 
 class IEFModule(nn.Module):
@@ -28,7 +28,7 @@ class IEFModule(nn.Module):
                                         self.fc3)
 
         self.iterations = iterations
-        self.initial_params_estimate = self.load_mean_params_6d_pose(config.SMPL_MEAN_PARAMS_PATH)
+        self.initial_params_estimate = self.load_mean_params_6d_pose(consts.SMPL_MEAN_PARAMS_PATH)
 
     def load_mean_params_6d_pose(self, mean_params_path):
         mean_smpl = np.load(mean_params_path)
