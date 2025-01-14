@@ -12,7 +12,6 @@ import consts
 from data.data_process import DataProcessor
 
 from data.synthetic_training_dataset import SyntheticTrainingDataset
-from metrics.train_loss_and_metrics_tracker import TrainingLossesAndMetricsTracker
 
 from models.regressor import SingleInputRegressor
 from models.smpl_official import SMPL
@@ -24,13 +23,14 @@ from utils.joints2d_utils import check_joints2d_visibility_torch
 from utils.cam_utils import orthographic_project_torch
 
 from utils.rigid_transform_utils import rot6d_to_rotmat
+from wandb_logger import WandbLogger
 
 
 class Trainer(object):
     def __init__(self):
         self.opts = Opts()
-        self.set_dirs(self.opts.experiment_name)
-        self.set_datasets(self.opts.val_perc)
+        self._set_dirs(self.opts.experiment_name)
+        self._set_datasets(self.opts.val_perc)
 
         self.regressor = SingleInputRegressor(self.opts.resnet_in_channels, self.opts.resnet_layers,
                                               ief_iters=self.opts.ief_iters).to(self.opts.device)
@@ -39,13 +39,21 @@ class Trainer(object):
         self.criterion = HomoscedasticUncertaintyWeightedMultiTaskLoss(self.opts.losses_on, self.opts.regressor_input_dim,
                                                                   init_loss_weights=self.opts.init_loss_weights,
                                                                   reduction='mean').to(self.opts.device)
+
         self.optimiser = optim.Adam(list(self.regressor.parameters()) + list(self.criterion.parameters()), lr=self.opts.lr)
 
         self.proxy_creator = DataProcessor(self.opts, self.smpl_model)
 
+        self.logger = WandbLogger(self.opts.save_val_metrics, project_name="STAPS", run_name=self.opts.experiment_name)
 
-    def set_datasets(self, val_perc):
+        self.global_step = 0
+        self.epoch = 0
+
+
+    def _set_datasets(self, val_perc):
         train_dataset = SyntheticTrainingDataset(npz_path=consts.TRAIN_DATA_PATH, params_from='all')
+
+        # Split train val
         n = len(train_dataset)
         val_size = int(val_perc * n)
         train_dataset, val_dataset = torch.utils.data.random_split(train_dataset, [n - val_size, val_size])
@@ -58,7 +66,7 @@ class Trainer(object):
         self.train_dataloader = get_dataloader(train_dataset, self.opts)
         self.val_dataloader = get_dataloader(val_dataset, self.opts)
 
-    def set_dirs(self, experiment_name):
+    def _set_dirs(self, experiment_name):
         # Path to save model weights to (without .tar extension).
         self.model_save_path = os.path.join(f'trained_models/{experiment_name}/straps_model_checkpoint_exp001')
         self.log_path = os.path.join(f'trained_models/{experiment_name}/straps_model_logs_exp001.pkl')
@@ -67,118 +75,88 @@ class Trainer(object):
         if not os.path.isdir('./logs'):
             os.makedirs('./logs')
 
-    def run_epoch(self, dataloader, metrics_tracker, train=True):
-        for batch_num, samples_batch in enumerate(tqdm(dataloader)):
-            target_pose = samples_batch['pose'].to(self.opts.device)
-            target_shape = samples_batch['shape'].to(self.opts.device)
-            gender = torch.randint(0, 2, (len(target_pose),)).to(self.opts.device)
-            num_train_inputs_in_batch = target_pose.shape[0]  # Same as bs since drop_last=True
+    def process_batch(self, batch, augment):
+        target_pose = batch['pose'].to(self.opts.device)
+        target_shape = batch['shape'].to(self.opts.device)
+        gender = torch.randint(0, 2, (len(target_pose),)).to(self.opts.device)
+        num_train_inputs_in_batch = target_pose.shape[0]  # Same as bs since drop_last=True
 
-            input, target_pose_rotmat, target_joints2d_coco, \
-                target_vertices, target_joints_h36mlsp, target_reposed_vertices \
-                = self.proxy_creator.prepare_pose(target_pose, target_shape, gender, augment=train)
+        input, target_pose_rotmat, target_joints2d_coco, \
+            target_vertices, target_joints_h36mlsp, target_reposed_vertices \
+            = self.proxy_creator.prepare_pose(target_pose, target_shape, gender, augment=augment)
 
-            # ---------------- FORWARD PASS ----------------
-            # (gradients being computed from here on)
-            pred_cam_wp, pred_pose, pred_shape = self.regressor(input, gender)
+        # ---------------- FORWARD PASS ----------------
+        # (gradients being computed from here on)
+        pred_cam_wp, pred_pose, pred_shape = self.regressor(input, gender)
 
-            # ---------------- process predictions ----------------
-            pred_vertices, pred_pose_rotmats, pred_joints2d_coco, \
-                pred_joints_h36mlsp, pred_reposed_vertices \
-                = process_prediction(pred_pose, pred_shape, pred_cam_wp, gender, self.proxy_creator)
+        # ---------------- process predictions ----------------
+        pred_vertices, pred_pose_rotmats, pred_joints2d_coco, \
+            pred_joints_h36mlsp, pred_reposed_vertices \
+            = process_prediction(pred_pose, pred_shape, pred_cam_wp, gender, self.proxy_creator)
 
-            # ---------------- LOSS ----------------
-            # Check joints visibility
-            target_joints2d_vis_coco = check_joints2d_visibility_torch(target_joints2d_coco,
-                                                                       self.opts.regressor_input_dim)
+        # ---------------- LOSS ----------------
+        # Check joints visibility
+        target_joints2d_vis_coco = check_joints2d_visibility_torch(target_joints2d_coco,
+                                                                   self.opts.regressor_input_dim)
 
-            pred_dict_for_loss = {'joints2D': pred_joints2d_coco,
-                                  'verts': pred_vertices,
-                                  'shape_params': pred_shape,
-                                  'pose_params_rot_matrices': pred_pose_rotmats,
-                                  'joints3D': pred_joints_h36mlsp}
-            target_dict_for_loss = {'joints2D': target_joints2d_coco,
-                                    'verts': target_vertices,
-                                    'shape_params': target_shape,
-                                    'pose_params_rot_matrices': target_pose_rotmat,
-                                    'joints3D': target_joints_h36mlsp,
-                                    'vis': target_joints2d_vis_coco}
+        pred_dict_for_loss = {'joints2D': pred_joints2d_coco,
+                              'verts': pred_vertices,
+                              'shape_params': pred_shape,
+                              'pose_params_rot_matrices': pred_pose_rotmats,
+                              'joints3D': pred_joints_h36mlsp}
+        target_dict_for_loss = {'joints2D': target_joints2d_coco,
+                                'verts': target_vertices,
+                                'shape_params': target_shape,
+                                'pose_params_rot_matrices': target_pose_rotmat,
+                                'joints3D': target_joints_h36mlsp,
+                                'vis': target_joints2d_vis_coco}
 
-
-            if train:
-                self.optimiser.zero_grad()
-
-            loss, task_losses_dict = self.criterion(target_dict_for_loss, pred_dict_for_loss)
-            # ---------------- BACKWARD PASS ----------------
-            if train:
-                loss.backward()
-                self.optimiser.step()
-
-            # ---------------- TRACK LOSS AND METRICS ----------------
-            metrics_tracker.update_per_batch('train' if train else 'val', loss, task_losses_dict,
-                                             pred_dict_for_loss, target_dict_for_loss,
-                                             num_train_inputs_in_batch,
-                                             pred_reposed_vertices=pred_reposed_vertices,
-                                             target_reposed_vertices=target_reposed_vertices)
+        return self.criterion(target_dict_for_loss, pred_dict_for_loss)
 
     def train(self):
-        current_epoch = 0
-        best_epoch_val_metrics = {}
-        # metrics that decide whether to save model after each epoch or not
-        for metric in self.opts.save_val_metrics:
-            best_epoch_val_metrics[metric] = np.inf
-        best_epoch = current_epoch
-        best_model_wts = copy.deepcopy(self.regressor.state_dict())
-
-        # Instantiate metrics tracker.
-        metrics_tracker = TrainingLossesAndMetricsTracker(losses_to_track=self.opts.losses_to_track,
-                                                          metrics_to_track=self.opts.metrics_to_track,
-                                                          img_wh=self.opts.regressor_input_dim,
-                                                          log_path=self.log_path,
-                                                          load_logs=False,
-                                                          current_epoch=current_epoch)
-
-        # Starting training loop
-        for epoch in range(current_epoch, self.opts.num_epochs):
-            print('\nEpoch {}/{}'.format(epoch, self.opts.num_epochs - 1))
+        for self.epoch in range(self.opts.num_epochs):
+            print('\nEpoch {}/{}'.format(self.epoch, self.opts.num_epochs - 1))
             print('-' * 10)
-            metrics_tracker.initialise_loss_metric_sums()
 
             # Train
             self.regressor.train()
-            self.run_epoch(self.train_dataloader, metrics_tracker, train=True)
+            for batch in tqdm(self.train_dataloader):
+                loss, losses_dict = self.process_batch(batch, augment=True)
+                loss.backward()
+                self.optimiser.step()
+                self.optimiser.zero_grad()
+
+                losses_dict['loss'] = loss
+                self.logger.log(losses_dict, step=self.global_step, train=True)
+                self.global_step += 1
 
             # Eval
             self.regressor.eval()
             with torch.no_grad():
-                self.run_epoch(self.val_dataloader, metrics_tracker, train=False)
+                aggregated_losses = None
+                for batch in tqdm(self.train_dataloader):
+                    loss, losses_dict = self.process_batch(batch, augment=True)
 
-            metrics_tracker.update_per_epoch()
+                    losses_dict['loss'] = loss
+                    if aggregated_losses is None:
+                        aggregated_losses = losses_dict
+                    else:
+                        for key in losses_dict:
+                            aggregated_losses[key] += (losses_dict[key] / len(self.train_dataloader))
 
-            save_model_weights_this_epoch = metrics_tracker.determine_save_model_weights_this_epoch(self.opts.save_val_metrics,
-                                                                                                    best_epoch_val_metrics)
+            self.logger.log(aggregated_losses, step=self.global_step, train=False)
 
-            if save_model_weights_this_epoch:
-                for metric in self.opts.save_val_metrics:
-                    best_epoch_val_metrics[metric] = metrics_tracker.history['val_' + metric][-1]
-                print("Best epoch val metrics updated to ", best_epoch_val_metrics)
-                best_model_wts = copy.deepcopy(self.regressor.state_dict())
-                best_epoch = epoch
-                print("Best model weights updated!")
+            #### # Save model
+            save_dict = {'epoch': self.epoch,
+                         'global_step': self.global_step,
+                         'model_state_dict': self.regressor.state_dict(),
+                         'optimiser_state_dict': self.optimiser.state_dict(),
+                         'criterion_state_dict': self.criterion.state_dict()}
+            torch.save(save_dict, self.model_save_path + f'_epoch-{self.epoch}.tar')
 
-            if epoch % self.opts.epochs_per_save == 0:
-                # Saving current epoch num, best epoch num, best validation metrics (occurred in best
-                # epoch num), current regressor state_dict, best regressor state_dict, current
-                # optimiser state dict and current criterion state_dict (i.e. multi-task loss weights).
-                save_dict = {'epoch': epoch,
-                             'best_epoch': best_epoch,
-                             'best_epoch_val_metrics': best_epoch_val_metrics,
-                             'model_state_dict': self.regressor.state_dict(),
-                             'best_model_state_dict': best_model_wts,
-                             'optimiser_state_dict': self.optimiser.state_dict(),
-                             'criterion_state_dict': self.criterion.state_dict()}
-                torch.save(save_dict, self.model_save_path + '_epoch{}'.format(epoch) + '.tar')
-                print('Model saved! Best Val Metrics:\n', best_epoch_val_metrics, '\nin epoch {}'.format(best_epoch))
+            # if new_best:
+            #     print("Best epoch val metrics updated to ", best_epoch_val_metrics)
+            #     torch.save(save_dict, self.model_save_path + f'_best.tar')
 
             # TODO: this causes some segfault
             # predict_3D(os.path.join(os.path.dirname(__file__),'..', 'demo'),
@@ -187,10 +165,9 @@ class Trainer(object):
             #            outpath=model_save_path + f'test_epoch{epoch}')
             # self.regressor.to(device)
 
-        print('Training Completed. Best Val Metrics:\n',
-              best_epoch_val_metrics)
+        print('Training Completed. Best Val Metrics:\n')
 
-        self.regressor.load_state_dict(best_model_wts)
+        return best_model_wts
 
 
 def process_prediction(pred_pose, pred_shape, pred_cam_wp, gender, proxy_creator):
