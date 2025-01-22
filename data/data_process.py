@@ -13,6 +13,8 @@ from utils.image_utils import batch_crop_seg_to_bounding_box, batch_resize
 from utils.label_conversions import convert_multiclass_to_binary_labels_torch, convert_2Djoints_to_gaussian_heatmaps_torch
 
 
+
+
 class DataProcessor(object):
     def __init__(self, opts, smpl_model):
         self.opts = opts
@@ -43,7 +45,8 @@ class DataProcessor(object):
                                          self.cam_K,
                                          self.cam_R,
                                          opts.regressor_input_dim,
-                                         rend_parts_seg=True).to(device)
+                                         rend_parts_seg=not self.opts.condition_on_depth).to(device)
+
 
     def prepare_pose(self, target_pose, target_shape, gender, augment=True):
         # TARGET SMPL PARAMETERS
@@ -125,7 +128,9 @@ class DataProcessor(object):
                                                                              self.opts.proxy_rep_augment_params)
 
         # FINAL INPUT PROXY REPRESENTATION GENERATION WITH JOINT HEATMAPS
-        input = convert_multiclass_to_binary_labels_torch(input)
+        if not self.opts.condition_on_depth:
+            input = convert_multiclass_to_binary_labels_torch(input)
+
         input = input.unsqueeze(1)
         j2d_heatmaps = convert_2Djoints_to_gaussian_heatmaps_torch(target_joints2d_coco,
                                                                    self.opts.regressor_input_dim)

@@ -1,8 +1,6 @@
-import copy
 import os
 
 import torch
-import numpy as np
 import torch.optim as optim
 from smplx.lbs import batch_rodrigues
 from torch.utils.data import DataLoader
@@ -49,7 +47,6 @@ class Trainer(object):
         self.global_step = 0
         self.epoch = 0
 
-
     def _set_datasets(self, val_perc):
         train_dataset = SyntheticTrainingDataset(npz_path=consts.TRAIN_DATA_PATH, params_from='all')
 
@@ -69,7 +66,6 @@ class Trainer(object):
     def _set_dirs(self, experiment_name):
         # Path to save model weights to (without .tar extension).
         self.model_save_path = os.path.join(f'trained_models/{experiment_name}/straps_model_checkpoint_exp001')
-        self.log_path = os.path.join(f'trained_models/{experiment_name}/straps_model_logs_exp001.pkl')
         if not os.path.isdir(f'trained_models/{experiment_name}'):
             os.makedirs(f'trained_models/{experiment_name}')
         if not os.path.isdir('./logs'):
@@ -79,11 +75,11 @@ class Trainer(object):
         target_pose = batch['pose'].to(self.opts.device)
         target_shape = batch['shape'].to(self.opts.device)
         gender = torch.randint(0, 2, (len(target_pose),)).to(self.opts.device)
-        num_train_inputs_in_batch = target_pose.shape[0]  # Same as bs since drop_last=True
 
-        input, target_pose_rotmat, target_joints2d_coco, \
-            target_vertices, target_joints_h36mlsp, target_reposed_vertices \
-            = self.proxy_creator.prepare_pose(target_pose, target_shape, gender, augment=augment)
+        with torch.no_grad():
+            input, target_pose_rotmat, target_joints2d_coco, \
+                target_vertices, target_joints_h36mlsp, target_reposed_vertices \
+                = self.proxy_creator.prepare_pose(target_pose, target_shape, gender, augment=augment)
 
         # ---------------- FORWARD PASS ----------------
         # (gradients being computed from here on)
@@ -152,7 +148,7 @@ class Trainer(object):
                          'model_state_dict': self.regressor.state_dict(),
                          'optimiser_state_dict': self.optimiser.state_dict(),
                          'criterion_state_dict': self.criterion.state_dict()}
-            torch.save(save_dict, self.model_save_path + f'_epoch-{self.epoch}.tar')
+            torch.save(save_dict, self.model_save_path + f'_epoch-{self.epoch}.pt')
 
             # if new_best:
             #     print("Best epoch val metrics updated to ", best_epoch_val_metrics)
@@ -165,9 +161,8 @@ class Trainer(object):
             #            outpath=model_save_path + f'test_epoch{epoch}')
             # self.regressor.to(device)
 
-        print('Training Completed. Best Val Metrics:\n')
-
-        return best_model_wts
+        # print('Training Completed. Best Val Metrics:\n')
+        # return best_model_wts
 
 
 def process_prediction(pred_pose, pred_shape, pred_cam_wp, gender, proxy_creator):

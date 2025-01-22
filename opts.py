@@ -12,7 +12,7 @@ class Opts:
     # ----------------------- Hyperparameters -----------------------
     num_epochs = 100
     batch_size = 100
-    lr = 0.0001
+    lr = 0.001
     epochs_per_save = 10
 
     # ----------------------- Data settings -----------------------
@@ -36,13 +36,12 @@ class Opts:
     # ----------------------- Augmentations -----------------------
     augment_shape = True
     delta_betas_distribution = 'normal'
-    betas_std = 1.5
     import torch # TODO check if can be removed
-    delta_betas_std_vector = torch.tensor(10 * [betas_std],  device=device).float()  # used if delta_betas_distribution is 'normal'
+    delta_betas_std = 1.5  # used if delta_betas_distribution is 'normal'
     delta_betas_range = [-3., 3.]  # used if delta_betas_distribution is 'uniform'
     smpl_augment_params = {'augment_shape': augment_shape,
                            'delta_betas_distribution': delta_betas_distribution,
-                           'delta_betas_std_vector': delta_betas_std_vector,
+                           'delta_betas_std': delta_betas_std,
                            'delta_betas_range': delta_betas_range}
     # Camera
     xy_std = 0.05
@@ -59,7 +58,8 @@ class Opts:
                            'delta_scale_range': delta_scale_range,
                            'delta_centre_range': delta_centre_range}
     # Proxy Representation
-    remove_appendages = True
+    condition_on_depth = False
+    remove_appendages = False # Removes entire bodyparts
     deviate_joints2D = True
     deviate_verts2D = True # TODO Ariel I changed this to False
     occlude_seg = False

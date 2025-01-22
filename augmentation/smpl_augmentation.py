@@ -39,7 +39,7 @@ def augment_smpl(orig_shape, pose, global_orients,
     augment_shape = smpl_augment_params['augment_shape']
     delta_betas_distribution = smpl_augment_params['delta_betas_distribution']  # 'normal' or 'uniform' shape sampling distribution
     delta_betas_range = smpl_augment_params['delta_betas_range']  # Range of uniformly-distributed shape parameters.
-    delta_betas_std_vector = smpl_augment_params['delta_betas_std_vector']  # std of normally-distributed the shape parameters.
+    delta_betas_std = smpl_augment_params['delta_betas_std']  # std of normally-distributed the shape parameters.
 
     batch_size = orig_shape.shape[0]
     if augment_shape:
@@ -47,7 +47,8 @@ def augment_smpl(orig_shape, pose, global_orients,
         if delta_betas_distribution == 'uniform':
             new_shape = uniform_sample_shape(batch_size, mean_shape, delta_betas_range)
         elif delta_betas_distribution == 'normal':
-            assert delta_betas_std_vector is not None
+            assert delta_betas_std is not None
+            delta_betas_std_vector = torch.tensor(10 * [delta_betas_std],  device=orig_shape.device).float()
             new_shape = normal_sample_shape(batch_size, mean_shape, delta_betas_std_vector)
     else:
         new_shape = orig_shape

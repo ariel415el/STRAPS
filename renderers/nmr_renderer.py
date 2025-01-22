@@ -88,7 +88,7 @@ class NMRRenderer(nn.Module):
         else:
             rend_image, depth, _ = self.renderer(vertices, self.faces, self.textures,
                                                  t=cam_ts)
-            return rend_image, depth
+            return depth
 
     def get_parts(self, parts, mask):
         """Process renderer part image to get body part indices."""

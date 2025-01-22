@@ -28,11 +28,11 @@ if __name__ == '__main__':
     print("Regressor loaded. Weights from:", args.checkpoint)
     regressor.to(device)
     checkpoint = torch.load(args.checkpoint, map_location=device)
-    regressor.load_state_dict(checkpoint['best_model_state_dict'])
+    regressor.load_state_dict(checkpoint['model_state_dict'])
 
     predict_3D(opts, args.input, regressor, device,
                silhouettes_from=args.silh_from,
                save_proxy_vis=True,
                render_vis=True,
-               outpath=os.path.join(os.path.dirname(args.input), "inference"))
+               outpath=os.path.join(os.path.dirname(args.input), "..", "inference"))
 

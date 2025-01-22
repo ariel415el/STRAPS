@@ -8,23 +8,17 @@ from detectron2.config import get_cfg
 from detectron2 import model_zoo
 from detectron2.engine import DefaultPredictor
 
-from PointRend.point_rend import add_pointrend_config
-from DensePose.densepose import add_densepose_config
-
 import consts
 
 from predict.predict_joints2D import predict_joints2D
-from predict.predict_silhouette_pointrend import predict_silhouette_pointrend
-from predict.predict_densepose import predict_densepose
 
 from models.smpl_official import SMPL
-from renderers.weak_perspective_pyrender_renderer import Renderer, interactive_render
+from renderers.weak_perspective_pyrender_renderer import Renderer
 
 from utils.image_utils import pad_to_square, crop_and_resize_silhouette_joints
 from utils.cam_utils import orthographic_project_torch
 from utils.joints2d_utils import undo_keypoint_normalisation
-from utils.label_conversions import convert_multiclass_to_binary_labels, \
-    convert_2Djoints_to_gaussian_heatmaps
+from utils.label_conversions import convert_2Djoints_to_gaussian_heatmaps
 from utils.rigid_transform_utils import rot6d_to_rotmat
 
 import matplotlib
@@ -140,7 +134,8 @@ def predict_3D(opts, input,
             # Predict 2D
             joints2D, bbox, joints2D_vis = predict_joints2D(image, joints2D_predictor)
             if silhouettes_from == 'detectron2':
-                silhouette, silhouette_vis = predict_silhouette_pointrend(image,
+                from predict.predict_silhouette_detectron import predict_silhouette_detectron
+                silhouette, silhouette_vis = predict_silhouette_detectron(image,
                                                                           silhouette_predictor)
             elif silhouettes_from == 'sam':
                 silhouette, silhouette_vis = silhouette_predictor.predict(image, bbox)

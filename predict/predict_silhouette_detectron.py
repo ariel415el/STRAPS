@@ -36,7 +36,7 @@ def get_largest_centred_mask(human_masks, orig_w, orig_h):
     return largest_centred_mask_index
 
 
-def predict_silhouette_pointrend(input_image, predictor):
+def predict_silhouette_detectron(input_image, predictor):
     """
     Predicts human silhouette (binary segmetnation) given a cropped and centred input image.
     :param input_images: (wh, wh)
