@@ -58,7 +58,7 @@ class Opts:
                            'delta_scale_range': delta_scale_range,
                            'delta_centre_range': delta_centre_range}
     # Proxy Representation
-    condition_on_depth = False
+    condition_on_depth = True
     remove_appendages = False # Removes entire bodyparts
     deviate_joints2D = True
     deviate_verts2D = True # TODO Ariel I changed this to False
